@@ -775,6 +775,45 @@ def build_features(
     return features, stats
 
 
+def canonical_sort(features: list[dict]) -> list[dict]:
+    """
+    Order the output deterministically, independent of the order rows and
+    segments happened to arrive in.
+
+    This is not cosmetic. The publishing workflow decides whether to publish
+    by comparing the output's SHA-256 against the last published one, so the
+    build has to be reproducible for identical input DATA, not merely for an
+    identical input FILE.
+
+    It wasn't, and this is how it was caught: the first successful CI run
+    produced a file byte-for-byte the same length as a local build, with the
+    same 11,167 features and byte-identical geometry for every one of them,
+    but a different hash — because the portal's `rows.csv` orders rows
+    differently from a hand export through the portal UI, and features were
+    emitted in input order. Left alone, the workflow would have published a
+    fresh release whenever Socrata's row ordering shifted, with identical
+    content.
+
+    The key is content-derived and verified unique across all 11,167
+    features, so there are no ties left to resolve nondeterministically.
+    """
+    def key(feature: dict) -> tuple:
+        props = feature["properties"]
+        centerline = props["centerline"]
+        return (
+            props["row_id"],
+            props["zone"],
+            props["signage_status"],
+            centerline[0][0],
+            centerline[0][1],
+            centerline[-1][0],
+            centerline[-1][1],
+            len(centerline),
+        )
+
+    return sorted(features, key=key)
+
+
 # ---------------------------------------------------------------------------
 # Step 10 — validation
 # ---------------------------------------------------------------------------
@@ -1101,6 +1140,8 @@ def main(argv: list[str] | None = None) -> int:
     index, scl_notes = load_scl(args.scl)
     signage_counts = derive_signage_status(rows)
     features, stats = build_features(rows, index, args.normal_space)
+    # Must happen before the hash anyone compares is taken — see canonical_sort.
+    features = canonical_sort(features)
 
     zones = {f["properties"]["zone"] for f in features}
 
