@@ -43,22 +43,21 @@ jobs:
       - name: Show Python version
         run: python3 --version
 
-      - name: Download the Parking Permit Zones CSV
+      # fetch_sources.py replaced two plain curl calls, for a reason worth
+      # knowing: the Street Center Lines geospatial-export URL returns HTTP
+      # 200 and a 53-byte stub, so curl exited 0 and the run failed two
+      # steps later with a confusing JSON traceback. The real data lives in
+      # the parent dataset pr57-gg9e, not the 6imu-meau map visualization.
+      # The full explanation is in fetch_sources.py's header — read it
+      # before changing any URL here.
+      - name: Download and validate the source datasets
         run: |
           set -euo pipefail
           mkdir -p source
-          curl -fsSL --retry 3 --retry-delay 5 \
-            "https://data.cityofchicago.org/api/views/u9xt-hiju/rows.csv?accessType=DOWNLOAD" \
-            -o "source/parking_permit_zones.csv"
-          ls -l source/parking_permit_zones.csv
-
-      - name: Download the Street Center Lines GeoJSON
-        run: |
-          set -euo pipefail
-          curl -fsSL --retry 3 --retry-delay 5 \
-            "https://data.cityofchicago.org/api/geospatial/6imu-meau?method=export&format=GeoJSON" \
-            -o "source/street_center_lines.geojson"
-          ls -l source/street_center_lines.geojson
+          python3 fetch_sources.py \
+            --zones-csv-out source/parking_permit_zones.csv \
+            --scl-out source/street_center_lines.geojson
+          ls -l source/
 
       # Fail loudly on a download that "succeeded" but returned something
       # unexpected — an error page, an empty file, a changed schema. Cheaper
