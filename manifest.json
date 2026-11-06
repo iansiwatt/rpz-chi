@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "data_version": "2026-11-06",
+  "built_at": "2026-11-06T15:50:36Z",
+  "release_tag": "data-2026-11-06",
+  "data_url": "https://github.com/iansiwatt/rpz-chi/releases/download/data-2026-11-06/chicago_parking_zones.geojson",
+  "filename": "chicago_parking_zones.geojson",
+  "bytes": 8093808,
+  "sha256": "50b4ade418ea6922d1bcafacaaf963733920db5ca7f4e76560e2d189b577080c",
+  "feature_count": 11167,
+  "zone_count": 1925,
+  "checks": {
+    "ground_truth_all_passed": true,
+    "match_rate": 0.98659,
+    "opposite_side_coverage": 0.90319,
+    "rows_unmatched": 99
+  },
+  "source_rows": {
+    "parking_permit_zones_total": 10418,
+    "parking_permit_zones_active": 9915,
+    "street_center_lines_features": 56338
+  }
+}
