@@ -127,6 +127,30 @@ REQUIRED_CSV_COLUMNS = (
     "BUFFER",
 )
 
+# Which signage_status values get geometry built.
+#
+# DECISION, 2026-11-06 (final form — an earlier draft of this same decision
+# got it wrong, and the wrong version is instructive).
+#
+# A buffer stretch carries NO PARKING RESTRICTION. That is what a buffer is:
+# parking is unrestricted there, and residents of those addresses are merely
+# eligible to buy permits for the zone named. So the answer to "can I park
+# here" on a buffer stretch is yes.
+#
+# The mistake was to conclude from that that buffer geometry should not
+# exist. It should. The no-restriction finding is about what the app REPORTS
+# WHILE DRIVING, not about what the data contains. Buffer geometry is still
+# built, still rendered, and still returned by taps and address lookups —
+# behind a toggle that defaults OFF — because a resident asking "which zone
+# could I apply for at this address" is a real question the data answers.
+# What changed is only that the driving report ignores buffer, and that
+# buffer results are worded "Zone X buffer: no parking restrictions" rather
+# than as a restriction.
+#
+# Hence BOTH statuses get geometry, as before. Buffer-unsigned still does
+# not. The app, not the pipeline, decides when to suppress buffer.
+GEOMETRY_STATUSES = ("Standard", "Buffer-signed")
+
 # Step 10 — ground truth. These are field-verified and are pass/fail.
 # Haussen Ct was ground-truthed twice (aldermanic office, then in person).
 # A build that puts a zone there is wrong; do not "fix" the expectation.
@@ -148,6 +172,16 @@ GROUND_TRUTH = [
         "expect_zone": "102",
     },
     {
+        # ROW 10184, a Buffer row classified Buffer-signed because signs were
+        # seen here IN PERSON. It expects Zone 102 and gets it.
+        #
+        # For a few hours on 2026-11-06 this expectation was flipped to None,
+        # when the no-restriction finding was misread as "buffer geometry
+        # should not exist". That put the build in direct contradiction with a
+        # field observation, which is a thing a ground-truth suite exists to
+        # make loud. The scope correction (see GEOMETRY_STATUSES above)
+        # removed the contradiction: the polygon exists and resolves, and
+        # suppression happens in the app's driving report instead.
         "label": "2134 W Concord Pl (even, Buffer-signed)",
         "lon": -87.68110260980616,
         "lat": 41.911295434929755,
@@ -376,6 +410,84 @@ def offset_ring(
     ring = [list(p) for p in centerline] + offsets[::-1]
     ring.append(list(centerline[0]))
     return ring
+
+
+# Grid/diagonal threshold for compass-side labelling, in degrees. A street
+# whose overall bearing is within this much of an axis gets a crisp N/S/E/W
+# label; anything further off is diagonal and gets an octant (NE/SE/SW/NW).
+# 20 deg was chosen deliberately: Chicago's grid streets sit within a couple
+# of degrees of true axes, so the tolerance is generous for them, while the
+# genuine diagonals (Milwaukee, Lincoln, Clark north of the river, Archer)
+# are 25-45 deg off and fall outside it cleanly. It is NOT a knob to widen if
+# some street labels look wrong — a wrong label on a bending street is a
+# curvature problem, which the app solves by computing the side at the
+# centerline segment nearest the query rather than from this one label.
+GRID_TOLERANCE_DEGREES = 20.0
+
+_OCTANTS = ("N", "NE", "E", "SE", "S", "SW", "W", "NW")
+
+
+def compass_side(
+    centerline: list[list[float]], ring: list[list[float]]
+) -> tuple[str, float, float]:
+    """
+    Which compass side of its street this polygon lies on, derived from the
+    geometry itself rather than from the odd/even convention.
+
+    Worth being explicit about why: the convention (east-west streets
+    even=north odd=south, north-south streets even=west odd=east) is a
+    generalisation. The Street Center Lines file carries SURVEYED per-side
+    parity (l_parity / r_parity), the ribbon is offset to whichever of those
+    sides matched the row, and so the polygon's actual position already
+    encodes the authoritative answer. Reading it back off the geometry
+    therefore agrees with the survey wherever the survey and the convention
+    disagree, which the convention alone could not.
+
+    Returns (side, street_bearing, bend) where `bend` is the worst deviation
+    of any single centerline segment from the overall bearing — a curvature
+    measure the app can use to decide whether one label for the whole
+    polygon is honest.
+    """
+    cpts = [to_feet(p[0], p[1]) for p in centerline]
+    rpts = [to_feet(p[0], p[1]) for p in ring[:-1]]  # drop the closing repeat
+    if len(cpts) < 2 or len(rpts) < 3:
+        return "", 0.0, 0.0
+
+    # Overall street direction, first vertex to last, as a compass bearing
+    # folded to 0-180 (a street has an orientation, not a direction of travel).
+    dx = cpts[-1][0] - cpts[0][0]
+    dy = cpts[-1][1] - cpts[0][1]
+    if math.hypot(dx, dy) < 1e-9:
+        return "", 0.0, 0.0
+    bearing = math.degrees(math.atan2(dx, dy)) % 180.0
+
+    bend = 0.0
+    for i in range(len(cpts) - 1):
+        sdx = cpts[i + 1][0] - cpts[i][0]
+        sdy = cpts[i + 1][1] - cpts[i][1]
+        if math.hypot(sdx, sdy) < 1e-9:
+            continue
+        sb = math.degrees(math.atan2(sdx, sdy)) % 180.0
+        dev = abs(sb - bearing)
+        bend = max(bend, min(dev, 180.0 - dev))
+
+    # Vector from the centerline's midpoint to the ring's centroid points
+    # from the street toward this polygon's flank.
+    mx = sum(p[0] for p in cpts) / len(cpts)
+    my = sum(p[1] for p in cpts) / len(cpts)
+    vx = sum(p[0] for p in rpts) / len(rpts) - mx
+    vy = sum(p[1] for p in rpts) / len(rpts) - my
+    if math.hypot(vx, vy) < 1e-9:
+        return "", bearing, bend
+
+    if abs(bearing - 90.0) <= GRID_TOLERANCE_DEGREES:
+        side = "N" if vy > 0 else "S"            # east-west street
+    elif bearing <= GRID_TOLERANCE_DEGREES or bearing >= 180.0 - GRID_TOLERANCE_DEGREES:
+        side = "E" if vx > 0 else "W"            # north-south street
+    else:
+        off = math.degrees(math.atan2(vx, vy)) % 360.0
+        side = _OCTANTS[int(((off + 22.5) % 360.0) // 45.0)]
+    return side, bearing, bend
 
 
 def point_in_ring(lon: float, lat: float, ring: list[list[float]]) -> bool:
@@ -668,6 +780,8 @@ def build_features(
         "stub_zero_width_overlap": 0,
         "stub_degenerate_segment": 0,
         "stub_single_address_rows": 0,
+        "side_counts": collections.Counter(),
+        "polygons_bending_past_tolerance": 0,
         "unmatched_detail": [],
     }
 
@@ -678,7 +792,7 @@ def build_features(
             stats["active_rows_matched"] += 1
 
     for row in rows:
-        if row["signage_status"] not in ("Standard", "Buffer-signed"):
+        if row["signage_status"] not in GEOMETRY_STATUSES:
             continue
         stats["rows_needing_geometry"] += 1
 
@@ -740,6 +854,11 @@ def build_features(
                     for p in pts
                 ]
 
+            compass, bearing, bend = compass_side(clipped, ring)
+            stats["side_counts"][compass or "?"] += 1
+            if bend > GRID_TOLERANCE_DEGREES:
+                stats["polygons_bending_past_tolerance"] += 1
+
             features.append(
                 {
                     "type": "Feature",
@@ -747,6 +866,22 @@ def build_features(
                         "zone": row["zone"],
                         "row_id": row["row_id"],
                         "signage_status": row["signage_status"],
+                        # Compass side of the street this polygon sits on,
+                        # read off the geometry (see compass_side). Empty
+                        # string if it could not be determined.
+                        "side": compass,
+                        # "O" or "E", straight from the source row's ODD_EVEN.
+                        # The app needs this to pick the right flank when
+                        # resolving a street address, where the house number's
+                        # parity is the only thing that says which side is
+                        # meant.
+                        "parity": row["odd_even"],
+                        # Worst deviation of any one centerline segment from
+                        # this polygon's overall bearing, in degrees. A large
+                        # value means the polygon bends, so `side` above
+                        # describes only part of its length and the app should
+                        # prefer its own per-segment computation.
+                        "bend_degrees": round(bend, 1),
                         "centerline": rnd(clipped),
                     },
                     "geometry": {
@@ -862,7 +997,7 @@ def opposite_side_fraction(rows: list[dict[str, Any]]) -> dict[str, Any]:
     opposite parity on the same street and zone. ~91% at last measure; the
     remainder is believed to be genuinely one-sided restriction.
     """
-    signed = [r for r in rows if r["signage_status"] in ("Standard", "Buffer-signed")]
+    signed = [r for r in rows if r["signage_status"] in GEOMETRY_STATUSES]
     by_key: dict[tuple, list[dict]] = collections.defaultdict(list)
     for r in signed:
         by_key[(r["zone"], r["direction"], r["name"], r["street_type"])].append(r)
@@ -1038,6 +1173,27 @@ def build_report(result: dict[str, Any]) -> str:
     add(f"  skipped, bad ring        {st['matches_skipped_bad_ring']}")
     add(f"  features built           {result['feature_count']}")
     add(f"  distinct zones           {result['zone_count']}")
+
+    add("")
+    add("SIDE OF STREET (per-polygon, read off the geometry)")
+    sc = st["side_counts"]
+    grid = sum(sc[k] for k in ("N", "S", "E", "W"))
+    diag = sum(sc[k] for k in ("NE", "SE", "SW", "NW"))
+    total = max(1, grid + diag + sc["?"])
+    add(f"  grid-aligned             {grid} ({grid / total:.1%})")
+    for k in ("N", "S", "E", "W"):
+        add(f"    {k:<22} {sc[k]}")
+    add(f"  diagonal                 {diag} ({diag / total:.1%})")
+    for k in ("NE", "SE", "SW", "NW"):
+        add(f"    {k:<22} {sc[k]}")
+    if sc["?"]:
+        add(f"  INDETERMINATE            {sc['?']}")
+    add(
+        f"  bending past {GRID_TOLERANCE_DEGREES:.0f} deg       "
+        f"{st['polygons_bending_past_tolerance']}"
+    )
+    add("    ^ these polygons curve enough that one side label describes only")
+    add("      part of their length; the app computes side per segment instead.")
 
     add("")
     add("STEP 10 — ground truth (pass/fail)")
