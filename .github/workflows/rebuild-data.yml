@@ -1,0 +1,229 @@
+name: Rebuild zone data
+
+# Publishes a new chicago_parking_zones.geojson when the city's source data
+# has actually changed, and nothing at all when it hasn't or when any
+# validation fails.
+#
+# CADENCE — read this before changing the schedule.
+# The agreed publishing cadence is quarterly; the city updates its dataset
+# daily but meaningful changes land after City Council meetings. This
+# workflow nonetheless runs MONTHLY, for one specific reason: GitHub
+# disables scheduled workflows in repositories with no activity for 60
+# days, and a quarterly schedule is ~90 days apart, so a purely quarterly
+# cron would switch itself off after the first gap. Running monthly and
+# publishing only on a real data change keeps the schedule alive while
+# honouring "publish only if the source data changed." If you move this
+# back to quarterly, add a separate keep-alive job or expect it to stop
+# firing.
+#
+# The minute is deliberately not :00 — scheduled workflows queue heavily on
+# the hour and get delayed.
+
+on:
+  schedule:
+    - cron: "37 7 3 * *"   # 07:37 UTC on the 3rd of each month
+  workflow_dispatch:        # and on demand, for testing
+
+permissions:
+  contents: write           # needed to create a Release and commit the manifest
+
+concurrency:
+  group: rebuild-data
+  cancel-in-progress: false
+
+jobs:
+  rebuild:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4.2.2
+
+      # No pip install step: build_zones.py and make_manifest.py are
+      # deliberately standard-library only.
+      - name: Show Python version
+        run: python3 --version
+
+      - name: Download the Parking Permit Zones CSV
+        run: |
+          set -euo pipefail
+          mkdir -p source
+          curl -fsSL --retry 3 --retry-delay 5 \
+            "https://data.cityofchicago.org/api/views/u9xt-hiju/rows.csv?accessType=DOWNLOAD" \
+            -o "source/parking_permit_zones.csv"
+          ls -l source/parking_permit_zones.csv
+
+      - name: Download the Street Center Lines GeoJSON
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 3 --retry-delay 5 \
+            "https://data.cityofchicago.org/api/geospatial/6imu-meau?method=export&format=GeoJSON" \
+            -o "source/street_center_lines.geojson"
+          ls -l source/street_center_lines.geojson
+
+      # Fail loudly on a download that "succeeded" but returned something
+      # unexpected — an error page, an empty file, a changed schema. Cheaper
+      # to catch here than to debug a strange build report.
+      - name: Sanity-check the downloads
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import csv, json, sys
+          with open("source/parking_permit_zones.csv", newline="", encoding="utf-8-sig") as fh:
+              rows = list(csv.DictReader(fh))
+          need = {"ROW ID","STATUS","ZONE","ODD_EVEN","ADDRESS RANGE - LOW",
+                  "ADDRESS RANGE - HIGH","STREET DIRECTION","STREET NAME",
+                  "STREET TYPE","BUFFER"}
+          missing = need - set(rows[0].keys()) if rows else need
+          if missing:
+              sys.exit(f"CSV is missing expected columns: {sorted(missing)}")
+          if len(rows) < 9000:
+              sys.exit(f"CSV has only {len(rows)} rows; expected ~10,400. Refusing to build.")
+          print(f"CSV OK: {len(rows)} rows, {len(rows[0])} columns")
+
+          scl = json.load(open("source/street_center_lines.geojson", encoding="utf-8"))
+          feats = scl.get("features", [])
+          if len(feats) < 50000:
+              sys.exit(f"SCL has only {len(feats)} features; expected ~56,000. Refusing to build.")
+          print(f"SCL OK: {len(feats)} features")
+          PY
+
+      # The previous published data, used as the regression baseline so the
+      # build report says exactly what changed. Absent on the very first run,
+      # which is fine — the build just skips the diff.
+      - name: Fetch the previously published data as a baseline
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p baseline
+          if [ -f manifest.json ]; then
+            TAG=$(python3 -c "import json;print(json.load(open('manifest.json'))['release_tag'])")
+            echo "Previous release tag: $TAG"
+            gh release download "$TAG" \
+              --repo "${{ github.repository }}" \
+              --pattern "chicago_parking_zones.geojson" \
+              --dir baseline || echo "Could not download $TAG; continuing without a baseline."
+          else
+            echo "No manifest.json yet — first run, no baseline."
+          fi
+          ls -l baseline || true
+
+      # build_zones.py exits non-zero and writes nothing if any ground-truth
+      # point disagrees or a health metric moves outside tolerance, so this
+      # step failing is the fail-closed behaviour working as intended.
+      - name: Build and validate
+        run: |
+          set -euo pipefail
+          mkdir -p data out
+          BASELINE_ARG=""
+          if [ -f baseline/chicago_parking_zones.geojson ]; then
+            BASELINE_ARG="--baseline baseline/chicago_parking_zones.geojson"
+          fi
+          python3 build_zones.py \
+            --zones-csv source/parking_permit_zones.csv \
+            --scl source/street_center_lines.geojson \
+            --out data/chicago_parking_zones.geojson \
+            --report out/report.txt \
+            --report-json out/report.json \
+            --unmatched-csv out/unmatched.csv \
+            $BASELINE_ARG
+
+      - name: Assert no zero-area polygons
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, math, sys
+          FT_LAT = 364404.0
+          FT_LON = FT_LAT * math.cos(math.radians(41.86))
+          feats = json.load(open("data/chicago_parking_zones.geojson"))["features"]
+          bad = 0
+          for f in feats:
+              ring = f["geometry"]["coordinates"][0]
+              ox, oy = ring[0]
+              pts = [((p[0]-ox)*FT_LON, (p[1]-oy)*FT_LAT) for p in ring]
+              a = 0.0
+              for i in range(len(pts)-1):
+                  a += pts[i][0]*pts[i+1][1] - pts[i+1][0]*pts[i][1]
+              if abs(a)/2.0 < 1.0:
+                  bad += 1
+          print(f"zero-area polygons: {bad} of {len(feats)}")
+          if bad:
+              sys.exit("Zero-area polygons present — runbook Step 7b has regressed.")
+          PY
+
+      # Keep the diagnostics whether or not anything is published.
+      - name: Upload the build report
+        if: always()
+        uses: actions/upload-artifact@v4.4.3
+        with:
+          name: build-report
+          path: out/
+          retention-days: 90
+
+      # Compare against the published hash. Identical data means the city
+      # changed nothing that affects us, so publish nothing.
+      - name: Decide whether anything changed
+        id: changed
+        run: |
+          set -euo pipefail
+          NEW=$(python3 -c "import hashlib;print(hashlib.sha256(open('data/chicago_parking_zones.geojson','rb').read()).hexdigest())")
+          echo "new sha256:  $NEW"
+          OLD=""
+          if [ -f manifest.json ]; then
+            OLD=$(python3 -c "import json;print(json.load(open('manifest.json')).get('sha256',''))")
+            echo "old sha256:  $OLD"
+          fi
+          if [ "$NEW" = "$OLD" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Data is byte-identical to what is already published. Nothing to do."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Generate the manifest
+        if: steps.changed.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          python3 make_manifest.py \
+            --data data/chicago_parking_zones.geojson \
+            --out manifest.json \
+            --repo "${{ github.repository }}" \
+            --report-json out/report.json
+
+      # The Release holds the 8 MB asset; the repo holds only the manifest.
+      # Create the release BEFORE committing the manifest, so the manifest's
+      # data_url is never live while pointing at a release that doesn't exist.
+      - name: Publish the Release
+        if: steps.changed.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG=$(python3 -c "import json;print(json.load(open('manifest.json'))['release_tag'])")
+          COUNT=$(python3 -c "import json;print(json.load(open('manifest.json'))['feature_count'])")
+          ZONES=$(python3 -c "import json;print(json.load(open('manifest.json'))['zone_count'])")
+          if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; replacing its asset."
+            gh release upload "$TAG" data/chicago_parking_zones.geojson \
+              --repo "${{ github.repository }}" --clobber
+          else
+            gh release create "$TAG" data/chicago_parking_zones.geojson \
+              --repo "${{ github.repository }}" \
+              --title "Zone data $TAG" \
+              --notes "Rebuilt from the Chicago Data Portal. ${COUNT} features, ${ZONES} zones. All Step 10 ground-truth checks passed. See the build-report artifact on the workflow run for the full report and the unmatched-row list."
+          fi
+
+      - name: Commit the manifest
+        if: steps.changed.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add manifest.json
+          if git diff --cached --quiet; then
+            echo "Manifest unchanged; nothing to commit."
+          else
+            TAG=$(python3 -c "import json;print(json.load(open('manifest.json'))['release_tag'])")
+            git commit -m "Publish zone data $TAG"
+            git push
+          fi

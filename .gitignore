@@ -1,6 +1,13 @@
 __pycache__/
 *.pyc
 
-# Build output. How the data file gets published is still an open decision
-# (committed file vs Release asset) — see hosting work.
+# Build output. The data file is published as a GitHub Release asset, not
+# committed — a quarterly 8 MB commit would stay in git history forever.
+# manifest.json IS committed: it is the small mutable pointer the app fetches.
 /data/
+
+# Workflow scratch: downloaded source datasets, the previous build used as a
+# regression baseline, and the build report (kept as a workflow artifact).
+/source/
+/baseline/
+/out/
