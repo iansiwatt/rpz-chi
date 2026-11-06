@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+
+# Build output. How the data file gets published is still an open decision
+# (committed file vs Release asset) — see hosting work.
+/data/
