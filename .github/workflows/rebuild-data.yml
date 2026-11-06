@@ -153,7 +153,7 @@ jobs:
       # Keep the diagnostics whether or not anything is published.
       - name: Upload the build report
         if: always()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: build-report
           path: out/
