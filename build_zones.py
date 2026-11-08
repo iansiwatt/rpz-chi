@@ -36,9 +36,12 @@ from __future__ import annotations
 import argparse
 import collections
 import csv
+import hashlib
 import json
 import math
+import os
 import sys
+from datetime import datetime, timezone
 from typing import Any
 
 # ---------------------------------------------------------------------------
@@ -1050,6 +1053,58 @@ def ring_displacement_feet(a: dict, b: dict) -> float | None:
     return total / len(ra)
 
 
+def content_fingerprint(features: list[dict]) -> str:
+    """SHA-256 of the canonically-sorted features alone.
+
+    Deliberately excludes the envelope, so the fingerprint answers "is this
+    the same zone data?" and not "is this the same file?". `data_version`
+    lives in the envelope, so hashing the whole file here would make every
+    build look different from every other and defeat the carry-over below.
+    """
+    payload = json.dumps(features, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def resolve_data_version(features: list[dict], baseline_path: str | None) -> str:
+    """The date this DATA first appeared — not the date it was last rebuilt.
+
+    Why this is not simply `date.today()`: `data_version` is written into the
+    GeoJSON itself, so a clock-derived stamp would change the file's bytes on
+    every monthly run even when the city changed nothing. The publishing
+    workflow decides what to publish by comparing the output's SHA-256
+    against the last published one, so a build-date stamp would cut a fresh
+    release every month forever — the exact failure `canonical_sort` exists
+    to prevent, reintroduced through the envelope.
+
+    So: if the features are identical to the baseline's, carry the baseline's
+    version forward and the file stays byte-identical. Only genuinely changed
+    data gets today's date.
+
+    This also makes the stamp mean the right thing for the app's "Data as of
+    <date>" line. First-appearance is the honest reading; last-rebuild would
+    advance monthly while telling the user nothing had changed.
+
+    An unstamped baseline (anything built before this function existed)
+    cannot be carried forward, so it gets today's date. That is a one-off
+    publish whose only change is the stamp, after which the chain is intact.
+    """
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if not baseline_path or not os.path.exists(baseline_path):
+        return today
+    try:
+        with open(baseline_path, encoding="utf-8") as fh:
+            base = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return today
+    previous = base.get("data_version")
+    if not previous:
+        return today
+    if content_fingerprint(canonical_sort(base.get("features", []))) == \
+            content_fingerprint(features):
+        return str(previous)
+    return today
+
+
 def diff_against_baseline(features: list[dict], baseline_path: str) -> dict[str, Any]:
     with open(baseline_path, encoding="utf-8") as fh:
         base = json.load(fh)
@@ -1415,10 +1470,25 @@ def main(argv: list[str] | None = None) -> int:
         print("\n--no-write set: validation passed, output file not written.")
         return 0
 
+    # `data_version` is what lets the app know what it already has, which is
+    # what lets the updater refuse to install something older. Without it the
+    # bundled file is undatable and "never install older" cannot be
+    # implemented at all. See resolve_data_version for why it is not today's
+    # date. Keys are ordered so the stamp sits at the top of the file where a
+    # human reading `head -c 200` will see it.
+    data_version = resolve_data_version(features, args.baseline)
     with open(args.out, "w", encoding="utf-8") as fh:
-        json.dump({"type": "FeatureCollection", "features": features}, fh)
+        json.dump(
+            {
+                "type": "FeatureCollection",
+                "data_version": data_version,
+                "features": features,
+            },
+            fh,
+        )
 
-    print(f"\nWrote {args.out} ({len(features)} features, {len(zones)} zones).")
+    print(f"\nWrote {args.out} ({len(features)} features, {len(zones)} zones, "
+          f"data_version {data_version}).")
     return 0
 
 

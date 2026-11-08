@@ -17,8 +17,13 @@ The app fetches the manifest first, compares `data_version` against what it
 already has, and downloads `data_url` only when the manifest is newer. It
 then verifies `sha256` and `feature_count` before swapping anything in.
 
-`data_version` is the build date, so plain string comparison orders versions
-correctly and a human can read it.
+`data_version` is a UTC date in YYYY-MM-DD form, so plain string comparison
+orders versions correctly and a human can read it. It is read out of the
+GeoJSON itself, which build_zones.py stamps with the date the DATA first
+appeared, not the date it was last rebuilt — see resolve_data_version there.
+The file and the manifest therefore always agree, which is what allows the
+app to compare the manifest against what it already has without downloading
+anything.
 
 Standard library only, to match build_zones.py.
 """
@@ -55,7 +60,7 @@ def main() -> int:
     )
     ap.add_argument(
         "--tag",
-        help="release tag; defaults to data-<today in UTC>",
+        help="release tag; defaults to data-<the file's data_version>",
     )
     ap.add_argument(
         "--report-json",
@@ -64,16 +69,28 @@ def main() -> int:
     args = ap.parse_args()
 
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    tag = args.tag or f"data-{today}"
     filename = os.path.basename(args.data)
 
     with open(args.data, encoding="utf-8") as fh:
         payload = json.load(fh)
     features = payload.get("features", [])
 
+    # Take the version from the DATA FILE, not the clock. The GeoJSON now
+    # carries its own `data_version`, set by build_zones.py to the date the
+    # data first appeared rather than the date it was last rebuilt, and that
+    # file is the thing the app actually installs. Deriving the manifest's
+    # version from today instead would let the two disagree: a run that
+    # carried a version forward would advertise today's date, the app would
+    # believe a newer file existed, download 8 MB, and find the data it
+    # already had — every month, forever.
+    #
+    # Falling back to today covers only a file built before the stamp existed.
+    data_version = str(payload.get("data_version") or today)
+    tag = args.tag or f"data-{data_version}"
+
     manifest = {
         "schema_version": SCHEMA_VERSION,
-        "data_version": today,
+        "data_version": data_version,
         "built_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "release_tag": tag,
         "data_url": (
