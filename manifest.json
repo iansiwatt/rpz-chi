@@ -1,12 +1,12 @@
 {
   "schema_version": 1,
-  "data_version": "2026-11-06",
-  "built_at": "2026-11-06T16:05:37Z",
-  "release_tag": "data-2026-11-06",
-  "data_url": "https://github.com/iansiwatt/rpz-chi/releases/download/data-2026-11-06/chicago_parking_zones.geojson",
+  "data_version": "2026-11-08",
+  "built_at": "2026-11-08T16:52:05Z",
+  "release_tag": "data-2026-11-08",
+  "data_url": "https://github.com/iansiwatt/rpz-chi/releases/download/data-2026-11-08/chicago_parking_zones.geojson",
   "filename": "chicago_parking_zones.geojson",
-  "bytes": 8093808,
-  "sha256": "387305b9a237a9cc7e1c399c93bc0381de60498c01b1036b443d6eb8e27df6a1",
+  "bytes": 8642260,
+  "sha256": "6389e6b45d9aa50197fac31f029770be7614f556acfbe2480045e0afdf2db78a",
   "feature_count": 11167,
   "zone_count": 1925,
   "checks": {
