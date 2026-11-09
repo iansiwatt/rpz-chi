@@ -1099,8 +1099,13 @@ def resolve_data_version(features: list[dict], baseline_path: str | None) -> str
     previous = base.get("data_version")
     if not previous:
         return today
+    # Both sides are sorted here rather than trusting the caller. `main`
+    # happens to pass already-sorted features, so this is not a live bug —
+    # but a caller that did not would get today's date for identical data and
+    # publish for nothing, which is precisely the failure canonical_sort was
+    # introduced to stop. Cheap to make the function correct on its own terms.
     if content_fingerprint(canonical_sort(base.get("features", []))) == \
-            content_fingerprint(features):
+            content_fingerprint(canonical_sort(features)):
         return str(previous)
     return today
 
