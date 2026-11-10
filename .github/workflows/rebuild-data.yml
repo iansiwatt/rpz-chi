@@ -43,6 +43,15 @@ jobs:
       - name: Show Python version
         run: python3 --version
 
+      # Run the data_version tests BEFORE building anything. This is the one
+      # value an installed app compares to decide what to install, and both
+      # ways of getting it wrong are invisible at build time: a version that
+      # never advances means apps stop updating, and one that advances every
+      # run means a release for data that did not change. Seconds to run, no
+      # network.
+      - name: Test the data_version rules
+        run: python3 -I test_data_version.py
+
       # fetch_sources.py replaced two plain curl calls, for a reason worth
       # knowing: the Street Center Lines geospatial-export URL returns HTTP
       # 200 and a 53-byte stub, so curl exited 0 and the run failed two
